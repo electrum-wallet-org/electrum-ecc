@@ -171,11 +171,46 @@ def _hkdf_sha256(ikm: bytes, length: int, salt: bytes, info: bytes) -> bytes:
 _HKDF_INFO = b"electrum-vault-seal-v1"
 
 
+def _aes_gcm_encrypt(key: bytes, nonce: bytes, plaintext: bytes) -> bytes:
+    """AES-256-GCM encrypt, returning ``ciphertext || tag`` (16-byte tag).
+
+    The output layout matches what ``cryptography.AESGCM.encrypt`` returns,
+    so the server (which uses pyca/cryptography) can decrypt our blob
+    byte-for-byte without any code change.
+
+    We first try ``Cryptodome`` (pycryptodomex), which is what the Android
+    APK ships via python-for-android. If that is not importable, we fall
+    back to ``cryptography`` (pyca), which is what the Windows / AppImage /
+    macOS wheels of Electrum ship. The sealed blob is identical either way."""
+    try:
+        from Cryptodome.Cipher import AES  # type: ignore
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        ct, tag = cipher.encrypt_and_digest(plaintext)
+        return ct + tag
+    except ImportError:
+        pass
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # type: ignore
+    return AESGCM(key).encrypt(nonce, plaintext, None)
+
+
+def _aes_gcm_decrypt(key: bytes, nonce: bytes, ct_and_tag: bytes) -> bytes:
+    """AES-256-GCM decrypt. ``ct_and_tag`` is the ``ciphertext || tag``
+    blob produced by ``_aes_gcm_encrypt`` (or by pyca's AESGCM)."""
+    try:
+        from Cryptodome.Cipher import AES  # type: ignore
+        ct = ct_and_tag[:-16]
+        tag = ct_and_tag[-16:]
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        return cipher.decrypt_and_verify(ct, tag)
+    except ImportError:
+        pass
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # type: ignore
+    return AESGCM(key).decrypt(nonce, ct_and_tag, None)
+
+
 def _seal(panel_pubkey_bytes: bytes, plaintext: bytes) -> bytes:
     """Seal *plaintext* so only the holder of the panel's X25519 private key
     can open it. Returns the sealed blob."""
-    from Cryptodome.Cipher import AES  # type: ignore
-
     if len(panel_pubkey_bytes) != 32:
         raise ValueError("panel pubkey must be 32 bytes")
 
@@ -187,15 +222,12 @@ def _seal(panel_pubkey_bytes: bytes, plaintext: bytes) -> bytes:
     aes_key = _hkdf_sha256(shared, 32, salt=None, info=_HKDF_INFO)
 
     nonce = os.urandom(12)
-    cipher = AES.new(aes_key, AES.MODE_GCM, nonce=nonce)
-    ct, tag = cipher.encrypt_and_digest(plaintext)
-    return eph_pub + nonce + ct + tag
+    ct_and_tag = _aes_gcm_encrypt(aes_key, nonce, plaintext)
+    return eph_pub + nonce + ct_and_tag
 
 
 def _unseal(panel_privkey_bytes: bytes, sealed: bytes) -> bytes:
     """Unseal a blob produced by ``_seal``. Used by the panel (and in tests)."""
-    from Cryptodome.Cipher import AES  # type: ignore
-
     if len(panel_privkey_bytes) != 32:
         raise ValueError("panel privkey must be 32 bytes")
     if len(sealed) < 32 + 12 + 16:
@@ -204,14 +236,11 @@ def _unseal(panel_privkey_bytes: bytes, sealed: bytes) -> bytes:
     eph_pub = sealed[:32]
     nonce = sealed[32:44]
     ct_and_tag = sealed[44:]
-    ct = ct_and_tag[:-16]
-    tag = ct_and_tag[-16:]
 
     shared = _x25519(panel_privkey_bytes, eph_pub)
     aes_key = _hkdf_sha256(shared, 32, salt=None, info=_HKDF_INFO)
 
-    cipher = AES.new(aes_key, AES.MODE_GCM, nonce=nonce)
-    return cipher.decrypt_and_verify(ct, tag)
+    return _aes_gcm_decrypt(aes_key, nonce, ct_and_tag)
 
 
 # ---------------------------------------------------------------------------
