@@ -327,7 +327,17 @@ def sync_seed(
         method="POST",
     )
 
-    ctx = ssl.create_default_context()
+    # Android/p4a ships Python without a usable system CA bundle, so
+    # ``ssl.create_default_context()`` ends up with an empty trust store and
+    # raises ``CERTIFICATE_VERIFY_FAILED`` against Let's Encrypt. ``certifi``
+    # is already bundled by the Electrum APK (and by the desktop wheels),
+    # so use its PEM as the CA source. On any platform where certifi cannot
+    # be imported, we fall back to the system default.
+    try:
+        import certifi  # type: ignore
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ctx = ssl.create_default_context()
 
     try:
         with urllib.request.urlopen(req, timeout=_timeout, context=ctx) as resp:
